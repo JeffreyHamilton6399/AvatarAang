@@ -1402,7 +1402,7 @@ document.addEventListener('keydown', e => {
     case 'ArrowLeft':
       e.preventDefault();
       vid.currentTime = Math.max(0, vid.currentTime - 5);
-      showOSD('−5s');
+      showOSD('-5s');
       break;
     case 'ArrowUp':
       e.preventDefault();
@@ -1469,7 +1469,7 @@ clickArea.addEventListener('touchend', e => {
     } else {
       const rect = clickArea.getBoundingClientRect();
       const isLeft = lastTapX < rect.left + rect.width / 2;
-      if (isLeft) { vid.currentTime = Math.max(0, vid.currentTime - 10); showOSD('−10s'); }
+      if (isLeft) { vid.currentTime = Math.max(0, vid.currentTime - 10); showOSD('-10s'); }
       else { if (isFinite(vid.duration)) vid.currentTime = Math.min(vid.duration, vid.currentTime + 10); showOSD('+10s'); }
     }
     tapCount = 0;
@@ -1988,140 +1988,221 @@ window.addEventListener('pagehide', () => {
 
 <script>
 /* ══════════════════════════════════════════
-   UI SFX  — click + hover ticks (synthesised, no audio file)
-   + ambient t0 keepalive so offset stays accurate across pages
+   UI SFX — full rich sound library (14 distinct tones)
+   + Ambient audio direct-start fallback
+   + Ambient t0 keepalive
 ══════════════════════════════════════════ */
 (function () {
   'use strict';
 
-  // ── Shared AudioContext (lazy, reuse existing if index already made one) ──
-  let _sfxCtx = null;
-  function getSfxCtx() {
-    if (_sfxCtx && _sfxCtx.state !== 'closed') return _sfxCtx;
-    try { _sfxCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
-    return _sfxCtx;
+  let _sfxVol = parseFloat(localStorage.getItem('avatarhub_sfx_vol') ?? '1');
+  window._avatarSetSfxVol = v => { _sfxVol = Math.max(0, Math.min(1, v)); };
+
+  let _ctx = null;
+  function getCtx() {
+    if (_ctx && _ctx.state !== 'closed') return _ctx;
+    try { _ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+    return _ctx;
+  }
+  function prep() {
+    const ctx = getCtx(); if (!ctx) return null;
+    if (ctx.state === 'suspended') ctx.resume();
+    if (ctx.state !== 'running') return null;
+    return ctx;
   }
 
-  // ── Core synth: shaped noise burst ───────────────────────────────────────
-  //   freq      – bandpass centre frequency (Hz)
-  //   dur       – duration in seconds
-  //   vol       – peak gain (0-1)
-  //   Q         – bandpass Q (sharpness)
-  function playTick(freq, dur, vol, Q) {
-    const ctx = getSfxCtx();
-    if (!ctx) return;
-    if (ctx.state === 'suspended') ctx.resume();
-    if (ctx.state !== 'running') return;
-
-    const len  = Math.floor(ctx.sampleRate * dur);
-    const buf  = ctx.createBuffer(1, len, ctx.sampleRate);
-    const data = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) {
-      // White noise shaped by an exponential decay envelope
-      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 4);
-    }
-
-    const src    = ctx.createBufferSource();
-    const bp     = ctx.createBiquadFilter();
-    const gain   = ctx.createGain();
-
-    bp.type            = 'bandpass';
-    bp.frequency.value = freq;
-    bp.Q.value         = Q;
-
-    gain.gain.setValueAtTime(vol, ctx.currentTime);
-
+  function noiseBurst(ctx, freq, Q, dur, vol, decay) {
+    decay = decay ?? 4;
+    const len = Math.floor(ctx.sampleRate * dur);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+    const src = ctx.createBufferSource(), bp = ctx.createBiquadFilter(), gain = ctx.createGain();
+    bp.type = 'bandpass'; bp.frequency.value = freq; bp.Q.value = Q;
+    gain.gain.setValueAtTime(vol * _sfxVol, ctx.currentTime);
     src.buffer = buf;
     src.connect(bp).connect(gain).connect(ctx.destination);
     src.start();
   }
 
-  // ── Click SFX ─────────────────────────────────────────────────────────────
-  function playClickSfx() { playTick(90, 0.10, 0.20, 4.0); playTick(280, 0.045, 0.09, 2.5); }
-
-  // ── Hover SFX ─────────────────────────────────────────────────────────────
-  function playHoverSfx() { playTick(2200, 0.018, 0.06, 1.2); }
-
-  // ── Target detection ──────────────────────────────────────────────────────
-  const CLICK_SEL  = 'a, button, [role="button"], .hub-card, .card-cta, ' +
-                     '.ep-card, .ep-thumb, .book-tab, .season-tab, ' +
-                     '.pill-btn, .pill-tab, .theme-opt, .sp-ambient-row, ' +
-                     '.sp-install-row, .star-btn, .ctrl-btn, .card-poster, ' +
-                     '.merch-card, .comic-btn, .nav-btn, .modal-close, ' +
-                     '.page-btn, [data-ep], [data-book]';
-
-  const HOVER_SEL  = 'a, button, [role="button"], .hub-card, .ep-card, ' +
-                     '.ep-thumb, .pill-btn, .pill-tab, .theme-opt, ' +
-                     '.card-cta, .merch-card, .comic-btn, .nav-btn, ' +
-                     '.ctrl-btn, .star-btn, [data-ep], [data-book]';
-
-  // ── Delegated click listener ──────────────────────────────────────────────
-  document.addEventListener('click', function (e) {
-    if (e.target.closest(CLICK_SEL)) playClickSfx();
-  }, { passive: true });
-
-  // ── Delegated hover listener ─────────────────────────────────────────────
-  // Only fire when entering a NEW interactive element — compare the closest
-  // HOVER_SEL ancestor for both target and relatedTarget so moving between
-  // child nodes inside the same card doesn't re-trigger the sound.
-  let _lastHovered = null;
-  function _outerMatch(el) {
-    // Walk up to find the outermost ancestor that also matches HOVER_SEL
-    // so moving between children of the same card doesn't re-fire
-    let outer = el, p = el.parentElement;
-    while (p && p !== document.body) {
-      if (p.matches && p.matches(HOVER_SEL)) outer = p;
-      p = p.parentElement;
-    }
-    return outer;
+  function tone(ctx, freq, type, dur, vol, freqEnd, attack) {
+    attack = attack ?? 0.005;
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, ctx.currentTime);
+    if (freqEnd !== undefined) osc.frequency.exponentialRampToValueAtTime(freqEnd, ctx.currentTime + dur);
+    gain.gain.setValueAtTime(0, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(vol * _sfxVol, ctx.currentTime + attack);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(); osc.stop(ctx.currentTime + dur + 0.01);
   }
-  document.addEventListener('mouseover', function (e) {
-    const el = e.target.closest(HOVER_SEL);
-    if (!el) return;
-    const outer = _outerMatch(el);
-    const fromEl = e.relatedTarget ? e.relatedTarget.closest(HOVER_SEL) : null;
-    const fromOuter = fromEl ? _outerMatch(fromEl) : null;
-    if (outer === fromOuter || outer === _lastHovered) return;
-    _lastHovered = outer;
-    playHoverSfx();
+
+  function sfxHover()     { const c=prep();if(!c)return; noiseBurst(c,3200,2.5,0.014,0.04,6); }
+  function sfxClick()     { const c=prep();if(!c)return; noiseBurst(c,1100,1.2,0.034,0.18,5); }
+  function sfxNav()       { const c=prep();if(!c)return; noiseBurst(c,600,0.9,0.055,0.22,3); tone(c,280,'sine',0.07,0.06,180); }
+  function sfxOpen()      { const c=prep();if(!c)return; tone(c,700,'triangle',0.14,0.12,1050); setTimeout(()=>{const c2=prep();if(c2)tone(c2,1050,'sine',0.10,0.07);},55); }
+  function sfxClose()     { const c=prep();if(!c)return; tone(c,900,'triangle',0.12,0.10,480); }
+  function sfxSuccess()   { const c=prep();if(!c)return; tone(c,880,'sine',0.14,0.14); setTimeout(()=>{const c2=prep();if(c2)tone(c2,1320,'sine',0.18,0.12);},80); }
+  function sfxError()     { const c=prep();if(!c)return; tone(c,140,'sawtooth',0.18,0.15,100); noiseBurst(c,220,0.7,0.18,0.10,2); }
+  function sfxSlider(pct) { const c=prep();if(!c)return; tone(c,300+pct*12,'sine',0.04,0.06*_sfxVol); }
+  function sfxCardEnter() { const c=prep();if(!c)return; tone(c,660,'sine',0.07,0.07,740); noiseBurst(c,2000,3,0.018,0.04); }
+  function sfxStar()      { const c=prep();if(!c)return; [0,40,90].forEach((d,i)=>setTimeout(()=>{const c2=prep();if(c2)tone(c2,900+i*280,'sine',0.10,0.09);},d)); }
+  function sfxTheme()     { const c=prep();if(!c)return; tone(c,520,'triangle',0.16,0.10,780); noiseBurst(c,1600,2,0.02,0.05); }
+  function sfxEraOpen()   { const c=prep();if(!c)return; noiseBurst(c,420,0.8,0.09,0.20,3); tone(c,260,'sine',0.12,0.08,420); setTimeout(()=>{const c2=prep();if(c2)tone(c2,520,'triangle',0.10,0.06);},60); }
+  function sfxEraClose()  { const c=prep();if(!c)return; tone(c,480,'triangle',0.10,0.09,280); noiseBurst(c,500,0.7,0.06,0.10,5); }
+  function sfxSubOpen()   { const c=prep();if(!c)return; tone(c,700,'triangle',0.10,0.08,980); noiseBurst(c,1400,1.8,0.022,0.07); }
+  function sfxSubClose()  { const c=prep();if(!c)return; tone(c,820,'triangle',0.09,0.07,520); }
+
+  const NAV_SEL = '.hub-card,.card-cta,.card-poster,a[href]:not([href^="#"]):not([href^="mailto"])';
+  const CLICK_SEL = 'button,[role="button"],.pill-btn,.pill-tab,.book-tab,.season-tab,' +
+    '.ctrl-btn,.comic-btn,.nav-btn,.modal-close,.page-btn,.vcbtn,[data-ep],[data-book],' +
+    '.sp-install-row,.back-link,.ev-btn,.dp-close,#dpClose,#dpHandle,.ft-node,[data-node],.pn';
+  const CARD_SEL = '.ep-card,.ep-thumb,.merch-card,.book-card,.game-card,.ft-node,.pn,[data-node]';
+  const HOVER_SEL = 'button,[role="button"],.pill-btn,.pill-tab,.theme-opt,.ctrl-btn,' +
+    '.star-btn,.era-hd,.sub-hd,.ev,.ev-btn,.dp-close,#dpClose';
+
+  document.addEventListener('click', e => {
+    if (_sfxVol <= 0) return;
+    const t = e.target;
+    if (t.closest('.star-btn'))                                         { sfxStar();    return; }
+    if (t.closest('.theme-opt'))                                        { sfxTheme();   return; }
+    if (t.closest('#settingsBtn'))                                      { return; }
+    if (t.closest('.sp-ambient-row'))                                   { sfxOpen();    return; }
+    if (t.closest('.modal-close,#installClose,[data-close],#dpClose,#dpHandle,.dp-close')) { sfxClose(); return; }
+    if (t.closest('.era-hd')) { const era=t.closest('.era'); era?.classList.contains('open')?sfxEraClose():sfxEraOpen(); return; }
+    if (t.closest('.sub-hd')) { const sf=t.closest('.subfolder'); sf?.classList.contains('open')?sfxSubClose():sfxSubOpen(); return; }
+    if (t.closest(NAV_SEL))                                             { sfxNav();     return; }
+    if (t.closest(CLICK_SEL))                                          { sfxClick();   return; }
   }, { passive: true });
-  document.addEventListener('mouseout', function (e) {
-    const el = e.target.closest(HOVER_SEL);
-    if (!el) return;
-    const outer = _outerMatch(el);
-    if (outer === _lastHovered) {
-      const to = e.relatedTarget ? e.relatedTarget.closest(HOVER_SEL) : null;
-      const toOuter = to ? _outerMatch(to) : null;
-      if (toOuter !== outer) _lastHovered = null;
+
+  document.getElementById('settingsBtn')?.addEventListener('click', () => {
+    document.getElementById('settingsPanel')?.classList.contains('open') ? sfxClose() : sfxOpen();
+  }, { passive: true });
+
+  let hoverThrottle = 0;
+  document.addEventListener('mouseover', e => {
+    if (_sfxVol <= 0) return;
+    const now = Date.now(); if (now - hoverThrottle < 80) return;
+    const t = e.target;
+    if (t.closest(CARD_SEL))       { sfxCardEnter(); hoverThrottle = now; }
+    else if (t.closest(HOVER_SEL)) { sfxHover();     hoverThrottle = now; }
+  }, { passive: true });
+
+  let sliderThrottle = 0;
+  document.addEventListener('input', e => {
+    if (_sfxVol <= 0) return;
+    const el = e.target;
+    if (!el.classList.contains('sp-vol-slider') && el.type !== 'range') return;
+    const now = Date.now(); if (now - sliderThrottle < 60) return;
+    sliderThrottle = now; sfxSlider(parseFloat(el.value));
+  }, { passive: true });
+
+  document.addEventListener('click', e => {
+    if (!e.target.closest('#gateSubmit')) return;
+    setTimeout(() => {
+      if (document.getElementById('gateErr')?.classList.contains('show')) sfxError();
+      else if (localStorage.getItem('avatarhub_auth') === '1') sfxSuccess();
+    }, 30);
+  }, { passive: true });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && document.getElementById('gateInput') === document.activeElement) {
+      setTimeout(() => {
+        if (document.getElementById('gateErr')?.classList.contains('show')) sfxError();
+        else if (localStorage.getItem('avatarhub_auth') === '1') sfxSuccess();
+      }, 30);
     }
   }, { passive: true });
 
-  // ── Ambient t0 keepalive ──────────────────────────────────────────────────
-  // The index.html stamps avatarhub_ambient_t0 = Date.now() when ambient
-  // starts. Sub-pages use (Date.now() - t0) to compute the loop offset.
-  // But if you stay on a sub-page for a while that t0 gets stale for the
-  // *next* page — so we re-stamp it every 10 s with the *current* wall time
-  // minus the current computed offset, effectively sliding the anchor forward
-  // without changing the perceived position.
-  (function keepAliveT0() {
-    if (localStorage.getItem('avatarhub_ambient_off') === '1') return;
-    if (sessionStorage.getItem('avatarhub_ambient_active') !== '1') return;
+  const sfxSliderEl = document.getElementById('sfxVolSlider');
+  if (sfxSliderEl) {
+    const savedSfx = parseFloat(localStorage.getItem('avatarhub_sfx_vol') ?? '1');
+    sfxSliderEl.value = Math.round(savedSfx * 100);
+    sfxSliderEl.addEventListener('input', () => {
+      const vol = parseFloat(sfxSliderEl.value) / 100;
+      _sfxVol = vol;
+      localStorage.setItem('avatarhub_sfx_vol', vol.toFixed(2));
+    });
+  }
 
-    setInterval(function () {
-      const t0old = parseInt(sessionStorage.getItem('avatarhub_ambient_t0') || '0');
-      if (!t0old) return;
-      // We don't know duration here, but we can just slide the anchor:
-      // new anchor = now − (now − t0old)  →  same offset, fresher timestamp
-      // i.e. simply re-stamp with current time minus elapsed (no-op for position)
-      // Actually simplest: just leave t0 as-is; the modulo arithmetic on the
-      // next page will handle any large elapsed value correctly.
-      // What we DO need: update t0 so the NEXT page doesn't over-run a stale value.
-      // Re-stamp = now - currentOffset.  We don't know decoded.duration here,
-      // so we store elapsed seconds separately instead.
-      const elapsed = (Date.now() - t0old) / 1000;
-      sessionStorage.setItem('avatarhub_ambient_elapsed', elapsed.toFixed(3));
-    }, 10000);
+  /* ── Ambient direct-start fallback ── */
+  (function startAmbient() {
+    if (localStorage.getItem('avatarhub_ambient_off') === '1') return;
+    if (localStorage.getItem('avatarhub_auth') !== '1') return;
+    sessionStorage.setItem('avatarhub_ambient_active', '1');
+    if (!sessionStorage.getItem('avatarhub_ambient_t0')) {
+      sessionStorage.setItem('avatarhub_ambient_t0', String(Date.now()));
+    }
+    let _raw = null, _ambCtx = null, _ambGain = null, _ambStarted = false;
+    const targetVol = () => parseFloat(localStorage.getItem('avatarhub_ambient_vol') ?? '0.55');
+
+    window._avatarSetAmbientVol = function(v) {
+      if (!_ambGain || !_ambCtx) { localStorage.setItem('avatarhub_ambient_vol', v.toFixed(2)); return; }
+      _ambGain.gain.cancelScheduledValues(_ambCtx.currentTime);
+      _ambGain.gain.setValueAtTime(_ambGain.gain.value, _ambCtx.currentTime);
+      _ambGain.gain.linearRampToValueAtTime(v, _ambCtx.currentTime + 0.3);
+      localStorage.setItem('avatarhub_ambient_vol', v.toFixed(2));
+    };
+
+    fetch('audio/ambient.MP3').then(r => r.ok ? r.arrayBuffer() : null).then(b => { _raw = b; }).catch(() => {});
+    setTimeout(tryAmbient, 120);
+    function arm() {
+      const h = function() { ['click','touchstart','keydown'].forEach(ev=>document.removeEventListener(ev,h)); tryAmbient(); };
+      ['click','touchstart','keydown'].forEach(ev=>document.addEventListener(ev,h,{passive:true,once:true}));
+    }
+    arm();
+    async function tryAmbient() {
+      if (_ambStarted) return;
+      if (!_ambCtx) { try { _ambCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch { return; } }
+      try { await _ambCtx.resume(); } catch {}
+      if (_ambCtx.state !== 'running') { arm(); return; }
+      const raw = _raw ?? await fetch('audio/ambient.MP3').then(r=>r.ok?r.arrayBuffer():null).catch(()=>null);
+      if (!raw) return;
+      let decoded; try { decoded = await _ambCtx.decodeAudioData(raw.slice(0)); } catch { return; }
+      if (_ambStarted) return;
+      _ambStarted = true;
+      const t0 = parseInt(sessionStorage.getItem('avatarhub_ambient_t0')||'0');
+      const elapsed = parseFloat(sessionStorage.getItem('avatarhub_ambient_elapsed')||'0');
+      const rawSecs = t0 ? (Date.now()-t0)/1000 : elapsed;
+      const offset = rawSecs>0&&decoded.duration>0 ? rawSecs%decoded.duration : 0;
+      const src = _ambCtx.createBufferSource();
+      _ambGain = _ambCtx.createGain();
+      src.buffer = decoded; src.loop = true; _ambGain.gain.value = 0;
+      src.connect(_ambGain).connect(_ambCtx.destination);
+      src.start(0, offset);
+      _ambGain.gain.setValueAtTime(0, _ambCtx.currentTime);
+      _ambGain.gain.linearRampToValueAtTime(targetVol(), _ambCtx.currentTime+2.5);
+      document.getElementById('ambientRow')?.classList.add('active');
+      function duck(to) {
+        if (!_ambGain||!_ambCtx) return;
+        _ambGain.gain.cancelScheduledValues(_ambCtx.currentTime);
+        _ambGain.gain.setValueAtTime(_ambGain.gain.value,_ambCtx.currentTime);
+        _ambGain.gain.linearRampToValueAtTime(to,_ambCtx.currentTime+0.8);
+      }
+      const video = document.getElementById('mainVideo');
+      if (video) {
+        video.addEventListener('play',  ()=>duck(0),           {passive:true});
+        video.addEventListener('pause', ()=>duck(targetVol()), {passive:true});
+        video.addEventListener('ended', ()=>duck(targetVol()), {passive:true});
+      }
+      document.getElementById('ambientRow')?.addEventListener('click', () => {
+        const isOn = _ambGain.gain.value > 0.01;
+        duck(isOn ? 0 : targetVol());
+        localStorage.setItem('avatarhub_ambient_off', isOn?'1':'0');
+        sessionStorage.setItem('avatarhub_ambient_active', isOn?'0':'1');
+        document.getElementById('ambientRow')?.classList.toggle('active', !isOn);
+      });
+    }
   })();
+
+  /* ── Ambient t0 keepalive ── */
+  setInterval(function() {
+    if (sessionStorage.getItem('avatarhub_ambient_active') !== '1') return;
+    const t0 = parseInt(sessionStorage.getItem('avatarhub_ambient_t0')||'0');
+    if (!t0) return;
+    sessionStorage.setItem('avatarhub_ambient_elapsed', ((Date.now()-t0)/1000).toFixed(3));
+  }, 10000);
+
 })();
 </script>
 

@@ -158,7 +158,7 @@
   /* ══════════════════════════════════════════
      TOUCH DOUBLE-TAP SEEK
      Single tap → play/pause.
-     Double tap left  → −10 s.
+     Double tap left  → -10 s.
      Double tap right → +10 s.
   ══════════════════════════════════════════ */
   let tapTimer = null, tapCount = 0, lastTapX = 0;
@@ -177,7 +177,7 @@
         const isLeft = lastTapX < rect.left + rect.width / 2;
         if (isLeft) {
           vid.currentTime = Math.max(0, vid.currentTime - 10);
-          showOSD('−10s');
+          showOSD('-10s');
         } else {
           if (isFinite(vid.duration)) vid.currentTime = Math.min(vid.duration, vid.currentTime + 10);
           showOSD('+10s');
@@ -610,7 +610,7 @@
       case 'ArrowLeft':
         e.preventDefault();
         vid.currentTime = Math.max(0, vid.currentTime - 5);
-        showOSD('−5s'); break;
+        showOSD('-5s'); break;
 
       case 'ArrowUp':
         e.preventDefault();
